@@ -48,6 +48,9 @@ import csv
 import hashlib
 import uuid
 import cStringIO
+import math
+
+csv.field_size_limit(sys.maxsize)
 
 DEBUG = False
 
@@ -80,6 +83,32 @@ class Sqlite3DBResults(object):
         self.query_column_names = query_column_names
         self.results = results
 
+def percentile(l, p):
+    # TODO Alpha implementation, need to provide multiple interpolation methods, and add tests
+    if not l:
+        return None
+    k = p*(len(l) - 1)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if c == f:
+        return l[int(k)]
+    return (c-k) * l[int(f)] + (k-f) * l[int(c)]
+
+class StrictPercentile(object):
+    def __init__(self):
+        self.values = []
+        self.p = None
+    def step(self,value,p):
+        if self.p is None:
+          self.p = p
+        self.values.append(value)
+
+    def finalize(self):
+        if len(self.values) == 0 or (self.p < 0 or self.p > 1):
+            return None 
+        else:
+            return percentile(sorted(self.values),self.p)
+
 class Sqlite3DB(object):
 
     def __init__(self, show_sql=SHOW_SQL):
@@ -95,6 +124,7 @@ class Sqlite3DB(object):
     def add_user_functions(self):
         self.conn.create_function("regexp", 2, regexp)
         self.conn.create_function("sha1", 1, sha1)
+        self.conn.create_aggregate("percentile",2,StrictPercentile)
 
     def is_numeric_type(self, column_type):
         return column_type in self.numeric_column_types
@@ -1287,8 +1317,9 @@ class QOutputPrinter(object):
                         'nonnumeric' : quote_nonnumeric_func,
                         'none' : quote_none_func }
 
-    def __init__(self,output_params):
+    def __init__(self,output_params,show_tracebacks=False):
         self.output_params = output_params
+        self.show_tracebacks = show_tracebacks
 
         self.output_field_quoting_func = QOutputPrinter.output_quoting_modes[output_params.output_quoting_mode]
 
@@ -1296,6 +1327,8 @@ class QOutputPrinter(object):
         if results.status == 'error':
             error = results.error
             print >>f,error.msg
+            if self.show_tracebacks:
+                print >>f,error.traceback
 
         for warning in results.warnings:
             print >>f,"%s" % warning.msg
@@ -1514,7 +1547,7 @@ def run_standalone():
 
     if len(args) == 0 and options.query_filename is None:
         print_credentials()
-        print >>sys.stderr,"Must provide at least one query in the command line, or through a file with the -f parameter"
+        print >>sys.stderr,"Must provide at least one query in the command line, or through a file with the -q parameter"
         sys.exit(1)
 
     if options.query_filename is not None:
@@ -1621,7 +1654,7 @@ def run_standalone():
         output_quoting_mode=options.output_quoting_mode,
         formatting=options.formatting,
         output_header=options.output_header)
-    q_output_printer = QOutputPrinter(output_params)
+    q_output_printer = QOutputPrinter(output_params,show_tracebacks=DEBUG)
 
     for query_str in query_strs:
         if options.analyze_only:
